@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: marketpulse-api
+    runtime: node
+    buildCommand: "npm install"
+    startCommand: "node server.js"
+    envVars:
+      - key: FINNHUB_API_KEY
+        sync: false          # set this in the Render dashboard
