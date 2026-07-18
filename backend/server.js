@@ -20,9 +20,14 @@ dotenv.config();
 
 const API_KEY  = process.env.FINNHUB_API_KEY || "demo";
 const PORT     = process.env.PORT || 4000;
-const POLL_MS  = 5000;
-const CACHE_TTL= 4000;            // serve cached quote if younger than this
-const HISTORY  = 90;              // ticks retained per symbol
+const POLL_MS   = 5000;           // how often we BROADCAST to clients
+const BATCH      = 2;             // symbols refreshed per poll (rate-limit budget)
+const CACHE_TTL  = 15000;         // serve cached quote if younger than this
+const HISTORY    = 90;            // ticks retained per symbol
+// Rate-limit math: Finnhub free = 30 req/min.
+//   BATCH(2) x (60000/POLL_MS = 12 polls/min) = 24 calls/min  -> safely under 30.
+// Each symbol refreshes every (SYMBOLS.length / BATCH) x POLL_MS = 20s, but the
+// dashboard still receives a broadcast every 5s so it always feels live.
 
 const SYMBOLS = ["AAPL","MSFT","GOOGL","AMZN","TSLA","NVDA","META","JPM"];
 const NAMES = { AAPL:"Apple", MSFT:"Microsoft", GOOGL:"Alphabet", AMZN:"Amazon",
@@ -135,9 +140,19 @@ async function fetchQuote(symbol) {
   return data;
 }
 
+let cursor = 0;                   // round-robin position in SYMBOLS
+
 async function poll() {
   const t0 = Date.now();
-  await Promise.all(SYMBOLS.map(async symbol => {
+
+  // --- pick the next BATCH symbols in the rotation (rate-limit friendly) ---
+  const batch = [];
+  for (let i = 0; i < BATCH; i++) {
+    batch.push(SYMBOLS[cursor]);
+    cursor = (cursor + 1) % SYMBOLS.length;
+  }
+
+  await Promise.all(batch.map(async symbol => {
     try {
       const { price, prevClose } = await fetchQuote(symbol);
       if (!price) return;
@@ -148,11 +163,15 @@ async function poll() {
       s.history.push({ t: Date.now(), price });
       if (s.history.length > HISTORY) s.history.shift();
       s.analytics = computeAnalytics(s.history);
-    } catch { metrics.errors++; }                 // degrade gracefully, keep last good value
+      s.updatedAt = Date.now();
+    } catch { metrics.errors++; }               // degrade gracefully, keep last good value
   }));
+
   metrics.lastPollMs = Date.now()-t0;
   metrics.broadcasts++;
 
+  // Broadcast the FULL state every poll, even though only a subset was refreshed —
+  // clients always see a complete picture.
   io.emit("tick", {
     stocks: Object.values(state),
     summary: marketSummary(),
@@ -165,10 +184,11 @@ function publicMetrics() {
   const uptime = Math.floor((Date.now()-metrics.startedAt)/1000);
   // fan-out saving: without the broadcast model each client would poll each symbol itself
   const callsSaved = Math.max(0, metrics.broadcasts * SYMBOLS.length * Math.max(0, metrics.clients-1));
+  const callsPerMin = Math.round(BATCH * (60000/POLL_MS));
   return { clients: metrics.clients, peakClients: metrics.peakClients,
            broadcasts: metrics.broadcasts, upstreamCalls: metrics.upstreamCalls,
            cacheHits: metrics.cacheHits, callsSaved, errors: metrics.errors,
-           lastPollMs: metrics.lastPollMs, uptime,
+           lastPollMs: metrics.lastPollMs, uptime, callsPerMin, rateLimit: 30,
            mode: API_KEY==="demo" ? "demo" : "live" };
 }
 
