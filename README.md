@@ -9,8 +9,6 @@ and — unusually — **the system's own operating metrics**.
 
 **Stack:** React (Vite) · Recharts · Node.js · Express · Socket.IO · Render + Vercel
 
-![screenshot](screenshot.png)
-
 ---
 
 ## The engineering problem this solves
